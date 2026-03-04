@@ -1,23 +1,17 @@
 from PIL import Image
 import numpy as np
+import json
+import argparse
+import sys
+import asyncio
 from pathlib import Path
+from typing import Optional
 
 
 def standardize_image(image_input, output_size=(256, 256)):
     """
     Standardizes an image to 256x256 RGB format (8 bits per channel).
     
-    Parameters:
-    -----------
-    image_input : str, Path, or PIL.Image.Image
-        Path to the image file or PIL Image object
-    output_size : tuple
-        Target size (width, height). Default is (256, 256)
-    
-    Returns:
-    --------
-    PIL.Image.Image
-        Standardized image in RGB format, 256x256 pixels
     """
     
     # Load image if path is provided
@@ -42,7 +36,6 @@ def standardize_image(image_input, output_size=(256, 256)):
         image = image.convert('RGB')
     
     # Step 2: Resize to 256x256
-    # Using LANCZOS for high-quality downsampling and upsampling
     image_resized = image.resize(output_size, Image.Resampling.LANCZOS)
     
     # Step 3: Ensure 8 bits per channel (8-bit RGB)
@@ -56,19 +49,6 @@ def standardize_and_save(image_input, output_path, output_size=(256, 256)):
     """
     Standardizes an image and saves it to disk.
     
-    Parameters:
-    -----------
-    image_input : str, Path, or PIL.Image.Image
-        Path to the image file or PIL Image object
-    output_path : str or Path
-        Path where the standardized image will be saved
-    output_size : tuple
-        Target size (width, height). Default is (256, 256)
-    
-    Returns:
-    --------
-    str
-        Path to the saved standardized image
     """
     
     standardized_image = standardize_image(image_input, output_size)
@@ -87,19 +67,6 @@ def batch_standardize(image_directory, output_directory, output_size=(256, 256))
     """
     Standardizes all images in a directory.
     
-    Parameters:
-    -----------
-    image_directory : str or Path
-        Directory containing images to standardize
-    output_directory : str or Path
-        Directory where standardized images will be saved
-    output_size : tuple
-        Target size (width, height). Default is (256, 256)
-    
-    Returns:
-    --------
-    list
-        List of processed image paths
     """
     
     image_directory = Path(image_directory)
@@ -124,17 +91,149 @@ def batch_standardize(image_directory, output_directory, output_size=(256, 256))
     return processed_files
 
 
-# Example usage:
+def load_validation_results(results_file: str) -> list[dict]:
+    """
+    Load validation results from a JSON file produced by Validation.py
+    
+    """
+    try:
+        with open(results_file, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"[Error] Validation results file not found: {results_file}")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"[Error] Invalid JSON in validation results file: {results_file}")
+        sys.exit(1)
+
+
+def filter_galaxy_images(results: list[dict]) -> list[Path]:
+    """
+    Filter validation results to get only confirmed galaxy images
+    
+    """
+    galaxy_images = []
+    for result in results:
+        if result.get("is_galaxy") is True and result.get("error") is None:
+            galaxy_images.append(Path(result["file"]))
+    return galaxy_images
+
+
+def standardize_and_save_galaxy_batch(
+    galaxy_images: list[Path], 
+    output_directory: str,
+    output_size: tuple = (256, 256)
+) -> dict:
+    """
+    Standardize validated galaxy images and save them for classification
+    
+    """
+    output_dir = Path(output_directory)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Metadata for classification phase
+    metadata = {
+        "standardized_images": [],
+        "failed_images": [],
+        "output_size": output_size,
+        "output_directory": str(output_dir)
+    }
+    
+    width = 72
+    print("\n" + "=" * width)
+    print(f"{'STANDARDIZING GALAXY IMAGES':^{width}}")
+    print("=" * width)
+    
+    for idx, image_path in enumerate(galaxy_images, 1):
+        try:
+            # Create output filename
+            output_filename = f"{image_path.stem}_standardized.png"
+            output_path = output_dir / output_filename
+            
+            # Standardize and save
+            saved_path = standardize_and_save(image_path, output_path, output_size)
+            
+            metadata["standardized_images"].append({
+                "original": str(image_path),
+                "standardized": str(saved_path),
+                "size": output_size,
+                "format": "PNG"
+            })
+            
+            print(f"  ✓  [{idx:3d}] {image_path.name:<40} → {output_filename}")
+            
+        except Exception as e:
+            metadata["failed_images"].append({
+                "original": str(image_path),
+                "error": str(e)
+            })
+            print(f"  ✗  [{idx:3d}] {image_path.name:<40} ERROR: {str(e)}")
+    
+    print("=" * width)
+    print(f"Successfully Standardized: {len(metadata['standardized_images'])}")
+    print(f"Failed: {len(metadata['failed_images'])}")
+    print(f"Output Directory: {output_dir}")
+    print("=" * width + "\n")
+    
+    # Save metadata for next phase
+    metadata_path = output_dir / "standardization_metadata.json"
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Metadata saved to: {metadata_path}\n")
+    
+    return metadata
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Standardize validated galaxy images for classification"
+    )
+    parser.add_argument(
+        "--validation-results",
+        type=str,
+        required=True,
+        help="Path to JSON file from Validation.py containing validation results"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="standardized_galaxies/",
+        help="Directory to save standardized images (default: standardized_galaxies/)"
+    )
+    parser.add_argument(
+        "--size",
+        type=int,
+        nargs=2,
+        default=[256, 256],
+        metavar=("WIDTH", "HEIGHT"),
+        help="Output image size in pixels (default: 256 256)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Load validation results
+    print(f"Loading validation results from: {args.validation_results}")
+    results = load_validation_results(args.validation_results)
+    
+    # Filter galaxy images
+    galaxy_images = filter_galaxy_images(results)
+    
+    if not galaxy_images:
+        print("[Error] No validated galaxy images found in results.")
+        sys.exit(1)
+    
+    print(f"Found {len(galaxy_images)} validated galaxy images.\n")
+    
+    # Standardize and save
+    output_size = tuple(args.size)
+    metadata = standardize_and_save_galaxy_batch(
+        galaxy_images,
+        args.output_dir,
+        output_size
+    )
+    
+    print(f"Standardization complete! Ready for classification phase.")
+
+
 if __name__ == "__main__":
-    # Single image standardization
-    # image = standardize_image("path/to/galaxy_image.jpg")
-    # image.show()
-    
-    # Save standardized image
-    # standardize_and_save("path/to/galaxy_image.jpg", "output/standardized_galaxy.png")
-    
-    # Batch process directory
-    # processed = batch_standardize("input_galaxies/", "output_galaxies/")
-    # print(f"Processed {len(processed)} images")
-    
-    pass
+    main()
