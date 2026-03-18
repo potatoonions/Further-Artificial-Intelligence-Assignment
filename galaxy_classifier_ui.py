@@ -169,7 +169,7 @@ def validate_galaxy(image_path: str) -> dict:
             ]
         }
         
-        GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash"
         
         # Try each API key
         last_error = None
