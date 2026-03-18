@@ -11,6 +11,15 @@ import threading
 import numpy as np
 import os
 import random
+import asyncio
+import base64
+import tempfile
+from pathlib import Path
+import httpx
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # ─────────────────────────────────────────────
 #  Colour palette & font constants
@@ -59,6 +68,126 @@ def rounded_rect(canvas, x1, y1, x2, y2, r=12, **kwargs):
 
 
 # ─────────────────────────────────────────────
+#  Validation & Standardization Helpers
+# ─────────────────────────────────────────────
+def standardize_image(image_input, output_size=(256, 256)):
+    """Standardize image to 256x256 RGB format."""
+    if isinstance(image_input, (str, Path)):
+        image = Image.open(image_input)
+    else:
+        image = image_input.copy()
+    
+    # Convert to RGB (handles RGBA, CMYK, grayscale, etc.)
+    if image.mode == 'RGBA':
+        rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+        rgb_image.paste(image, mask=image.split()[3])
+        image = rgb_image
+    elif image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    # Resize to output_size
+    image_resized = image.resize(output_size, Image.Resampling.LANCZOS)
+    
+    # Ensure 8-bit RGB
+    if image_resized.mode != 'RGB':
+        image_resized = image_resized.convert('RGB')
+    
+    return image_resized
+
+
+def load_image_b64(path: Path) -> tuple:
+    """Load image and return (mime_type, base64_data)."""
+    ext = path.suffix.lower()
+    mime_map = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".bmp": "image/bmp",
+        ".webp": "image/webp"
+    }
+    mime = mime_map.get(ext, "image/jpeg")
+    b64_data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+    return mime, b64_data
+
+
+async def validate_galaxy_async(image_path: str) -> dict:
+    """
+    Validate if image is a galaxy using Gemini API.
+    Returns dict with is_galaxy (bool), response (str), error (str or None)
+    """
+    try:
+        # Get API key
+        api_keys = []
+        for i in range(1, 7):
+            key = os.getenv(f"GEMINI_KEY_{i}", "").strip()
+            if key:
+                api_keys.append(key)
+        
+        if not api_keys:
+            return {
+                "is_galaxy": None,
+                "response": None,
+                "error": "No Gemini API keys found in .env file"
+            }
+        
+        api_key = api_keys[0]  # Use first available key
+        
+        path = Path(image_path)
+        mime_type, b64_data = load_image_b64(path)
+        
+        prompt = (
+            "Examine the following image CAREFULLY. "
+            "Determine if this is an image of a galaxy (e.g elliptical, spiral, irregular). "
+            "Reply with EXACTLY one of the following options (DO NOT ADD EXTRA EXPLANATION): \n"
+            "GALAXY - if the image shows a galaxy/galaxies. \n"
+            "NOT GALAXY - if the image does NOT show a galaxy/galaxies. \n"
+        )
+        
+        payload = {
+            "content": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": b64_data,
+                            }
+                        },
+                    ]
+                }
+            ]
+        }
+        
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+                params={"key": api_key},
+                json=payload,
+                timeout=60
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            text = body["candidates"][0]["content"]["parts"][0]["text"].strip()
+            is_galaxy = text.upper().startswith("GALAXY")
+            
+            return {
+                "is_galaxy": is_galaxy,
+                "response": text,
+                "error": None,
+            }
+    
+    except Exception as e:
+        return {
+            "is_galaxy": None,
+            "response": None,
+            "error": str(e),
+        }
+
+
+
+# ─────────────────────────────────────────────
 #  Main Application
 # ─────────────────────────────────────────────
 class GalaxyApp(tk.Tk):
@@ -74,6 +203,8 @@ class GalaxyApp(tk.Tk):
         self.result_label = tk.StringVar()
         self.result_conf  = tk.DoubleVar()
         self.all_probs    = {}
+        self.standardized_image_path = None
+        self.standardized_pil_image = None
 
         # Container for stacked pages
         container = tk.Frame(self, bg=BG_DARK)
@@ -320,9 +451,8 @@ class ProcessingPage(tk.Frame):
 
         self.step_labels = []
         steps = [
-            "Load & decode image",
-            "Resize to 299 × 299",
-            "Normalise pixel values",
+            "Validate image (Gemini API)",
+            "Standardize to 256 × 256",
             "Conv block 1 — 32 filters",
             "Conv block 2 — 64 filters",
             "Conv block 3 — 128 filters",
@@ -416,8 +546,97 @@ class ProcessingPage(tk.Frame):
     def _run_mock_inference(self):
         def run():
             n = len(self.step_labels)
-            for i, (dot, lbl) in enumerate(self.step_labels):
-                # Activate step
+            image_path = self.app.image_path.get()
+            
+            # Step 0: Validate image
+            dot_val, lbl_val = self.step_labels[0]
+            self.after(0, lambda d=dot_val, l=lbl_val: (
+                d.config(text="◉", fg=ACCENT),
+                l.config(fg=TEXT_PRIMARY)
+            ))
+            
+            # Run validation asynchronously
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                validation_result = loop.run_until_complete(validate_galaxy_async(image_path))
+                loop.close()
+            except Exception as e:
+                validation_result = {
+                    "is_galaxy": None,
+                    "response": None,
+                    "error": str(e)
+                }
+            
+            pct = int(0.5 / n * 100)
+            self.after(0, lambda p=pct: self._set_progress(p))
+            import time; time.sleep(0.3)
+            
+            # Check validation result
+            if validation_result["error"]:
+                self.after(0, lambda d=dot_val, l=lbl_val: (
+                    d.config(text="✗", fg=DANGER),
+                    l.config(fg=DANGER)
+                ))
+                error_msg = f"Validation Error:\n{validation_result['error']}"
+                self.after(100, lambda: messagebox.showerror("Validation Failed", error_msg))
+                self.after(200, lambda: self.app.show_page("UploadPage"))
+                return
+            
+            if not validation_result["is_galaxy"]:
+                self.after(0, lambda d=dot_val, l=lbl_val: (
+                    d.config(text="✗", fg=WARNING),
+                    l.config(fg=WARNING)
+                ))
+                error_msg = f"This image does not appear to be a galaxy.\n\nResponse: {validation_result['response']}"
+                self.after(100, lambda: messagebox.showwarning("Not a Galaxy", error_msg))
+                self.after(200, lambda: self.app.show_page("UploadPage"))
+                return
+            
+            # Mark validation as done
+            self.after(0, lambda d=dot_val, l=lbl_val: (
+                d.config(text="●", fg=ACCENT2),
+                l.config(fg=TEXT_SEC)
+            ))
+            
+            # Step 1: Standardize image
+            dot_std, lbl_std = self.step_labels[1]
+            self.after(0, lambda d=dot_std, l=lbl_std: (
+                d.config(text="◉", fg=ACCENT),
+                l.config(fg=TEXT_PRIMARY)
+            ))
+            
+            try:
+                standardized_img = standardize_image(image_path, output_size=(256, 256))
+                # Save standardized image temporarily
+                temp_dir = tempfile.gettempdir()
+                temp_path = os.path.join(temp_dir, "galaxy_standardized.png")
+                standardized_img.save(temp_path)
+                self.app.standardized_image_path = temp_path
+                self.app.standardized_pil_image = standardized_img
+            except Exception as e:
+                self.after(0, lambda d=dot_std, l=lbl_std: (
+                    d.config(text="✗", fg=DANGER),
+                    l.config(fg=DANGER)
+                ))
+                error_msg = f"Standardization Error:\n{str(e)}"
+                self.after(100, lambda: messagebox.showerror("Standardization Failed", error_msg))
+                self.after(200, lambda: self.app.show_page("UploadPage"))
+                return
+            
+            pct = int(1.5 / n * 100)
+            self.after(0, lambda p=pct: self._set_progress(p))
+            import time; time.sleep(0.3)
+            
+            # Mark standardization as done
+            self.after(0, lambda d=dot_std, l=lbl_std: (
+                d.config(text="●", fg=ACCENT2),
+                l.config(fg=TEXT_SEC)
+            ))
+            
+            # Steps 2+: Classification steps (placeholder - waiting for model)
+            for i in range(2, n):
+                dot, lbl = self.step_labels[i]
                 self.after(0, lambda d=dot, l=lbl: (
                     d.config(text="◉", fg=ACCENT),
                     l.config(fg=TEXT_PRIMARY)
@@ -425,11 +644,11 @@ class ProcessingPage(tk.Frame):
                 pct = int((i + 0.5) / n * 100)
                 self.after(0, lambda p=pct: self._set_progress(p))
                 import time; time.sleep(0.45)
-                # Mark done
                 self.after(0, lambda d=dot, l=lbl: (
                     d.config(text="●", fg=ACCENT2),
                     l.config(fg=TEXT_SEC)
                 ))
+            
             self.after(0, lambda: self._set_progress(100))
             self.after(200, self._finish_inference)
 
@@ -568,10 +787,15 @@ class ResultPage(tk.Frame):
         probs = self.app.all_probs
         path  = self.app.image_path.get()
 
-        # Thumbnail
+        # Thumbnail - use standardized image if available
         self.thumb_canvas.delete("all")
         try:
-            img = Image.open(path).convert("RGB")
+            # Prefer standardized image if available
+            if hasattr(self.app, 'standardized_pil_image') and self.app.standardized_pil_image:
+                img = self.app.standardized_pil_image.copy()
+            else:
+                img = Image.open(path).convert("RGB")
+            
             img.thumbnail((260, 220))
             self._tk_thumb = ImageTk.PhotoImage(img)
             iw, ih = img.size
@@ -663,6 +887,40 @@ if __name__ == "__main__":
         import subprocess, sys
         subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow", "-q"])
         from PIL import Image, ImageTk
+    
+    # Check for required dependencies
+    try:
+        import httpx
+    except ImportError:
+        import subprocess, sys
+        print("Installing httpx for Gemini API validation...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx", "-q"])
+    
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        import subprocess, sys
+        print("Installing python-dotenv for environment variables...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "python-dotenv", "-q"])
+    
+    # Check if .env file exists
+    env_path = Path(__file__).parent / '.env'
+    if not env_path.exists():
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showwarning(
+            "Missing Configuration",
+            ".env file not found!\n\n"
+            "For validation to work, create a .env file in this directory with:\n"
+            "GEMINI_KEY_1=your_api_key_here\n"
+            "GEMINI_KEY_2=your_api_key_here\n"
+            "(You can add up to 6 keys)\n\n"
+            "Without this, validation will fail.\n"
+            "The app will still run but validation won't work."
+        )
+        root.destroy()
 
     app = GalaxyApp()
     app.mainloop()
