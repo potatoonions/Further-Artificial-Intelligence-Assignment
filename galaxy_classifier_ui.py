@@ -15,11 +15,12 @@ import asyncio
 import base64
 import tempfile
 from pathlib import Path
-import httpx
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from script directory
+script_dir = Path(__file__).parent
+env_file = script_dir / '.env'
+load_dotenv(env_file)
 
 # ─────────────────────────────────────────────
 #  Colour palette & font constants
@@ -111,13 +112,23 @@ def load_image_b64(path: Path) -> tuple:
     return mime, b64_data
 
 
-async def validate_galaxy_async(image_path: str) -> dict:
+def validate_galaxy(image_path: str) -> dict:
     """
     Validate if image is a galaxy using Gemini API.
     Returns dict with is_galaxy (bool), response (str), error (str or None)
     """
     try:
-        # Get API key
+        # Import httpx
+        try:
+            import httpx
+        except ImportError:
+            return {
+                "is_galaxy": None,
+                "response": None,
+                "error": "httpx not installed. Install with: pip install httpx",
+            }
+        
+        # Get API keys and try each one
         api_keys = []
         for i in range(1, 7):
             key = os.getenv(f"GEMINI_KEY_{i}", "").strip()
@@ -131,11 +142,6 @@ async def validate_galaxy_async(image_path: str) -> dict:
                 "error": "No Gemini API keys found in .env file"
             }
         
-        api_key = api_keys[0]  # Use first available key
-        
-        path = Path(image_path)
-        mime_type, b64_data = load_image_b64(path)
-        
         prompt = (
             "Examine the following image CAREFULLY. "
             "Determine if this is an image of a galaxy (e.g elliptical, spiral, irregular). "
@@ -144,8 +150,11 @@ async def validate_galaxy_async(image_path: str) -> dict:
             "NOT GALAXY - if the image does NOT show a galaxy/galaxies. \n"
         )
         
+        path = Path(image_path)
+        mime_type, b64_data = load_image_b64(path)
+        
         payload = {
-            "content": [
+            "contents": [
                 {
                     "parts": [
                         {"text": prompt},
@@ -160,29 +169,53 @@ async def validate_galaxy_async(image_path: str) -> dict:
             ]
         }
         
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
-                params={"key": api_key},
-                json=payload,
-                timeout=60
-            )
-            resp.raise_for_status()
-            body = resp.json()
-            text = body["candidates"][0]["content"]["parts"][0]["text"].strip()
-            is_galaxy = text.upper().startswith("GALAXY")
-            
-            return {
-                "is_galaxy": is_galaxy,
-                "response": text,
-                "error": None,
-            }
+        GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        
+        # Try each API key
+        last_error = None
+        for api_key in api_keys:
+            try:
+                with httpx.Client(timeout=60.0) as client:
+                    resp = client.post(
+                        GEMINI_API_URL,
+                        params={"key": api_key},
+                        json=payload
+                    )
+                    
+                    if resp.status_code == 200:
+                        body = resp.json()
+                        
+                        # Check for API errors in response
+                        if "error" in body:
+                            last_error = f"API Error: {body['error'].get('message', str(body['error']))}"
+                            continue
+                        
+                        text = body["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        is_galaxy = text.upper().startswith("GALAXY")
+                        
+                        return {
+                            "is_galaxy": is_galaxy,
+                            "response": text,
+                            "error": None,
+                        }
+                    else:
+                        last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            except Exception as e:
+                last_error = str(e)
+                continue
+        
+        # If all keys failed
+        return {
+            "is_galaxy": None,
+            "response": None,
+            "error": last_error or "All API keys failed",
+        }
     
     except Exception as e:
         return {
             "is_galaxy": None,
             "response": None,
-            "error": str(e),
+            "error": f"Exception: {str(e)}",
         }
 
 
@@ -555,18 +588,8 @@ class ProcessingPage(tk.Frame):
                 l.config(fg=TEXT_PRIMARY)
             ))
             
-            # Run validation asynchronously
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                validation_result = loop.run_until_complete(validate_galaxy_async(image_path))
-                loop.close()
-            except Exception as e:
-                validation_result = {
-                    "is_galaxy": None,
-                    "response": None,
-                    "error": str(e)
-                }
+            # Run validation
+            validation_result = validate_galaxy(image_path)
             
             pct = int(0.5 / n * 100)
             self.after(0, lambda p=pct: self._set_progress(p))
