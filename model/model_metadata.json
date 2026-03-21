@@ -1,0 +1,19 @@
+{
+  "class_indices": {
+    "E": 0,
+    "S": 1,
+    "SB": 2
+  },
+  "class_labels": {
+    "0": "E",
+    "1": "S",
+    "2": "SB"
+  },
+  "img_size": 256,
+  "input_shape": [
+    256,
+    256,
+    3
+  ],
+  "num_classes": 3
+}
