@@ -10,8 +10,7 @@ from typing import Optional
 
 def standardize_image(image_input, output_size=(256, 256)):
     """
-    Standardizes an image to 256x256 RGB format (8 bits per channel).
-    
+    Standardizes an image to 256x256 RGB format (8 bits per channel).    
     """
     
     # Load image if path is provided

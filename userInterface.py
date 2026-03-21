@@ -8,7 +8,6 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 import threading
-import numpy as np
 import os
 import random
 import asyncio
@@ -16,6 +15,7 @@ import base64
 import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
+import classification
 
 # Load environment variables from script directory
 script_dir = Path(__file__).parent
@@ -331,7 +331,7 @@ class UploadPage(tk.Frame):
                                   font=("Segoe UI", 12, "bold"),
                                   bg=ACCENT2, fg=BG_DARK,
                                   activebackground="#00B090", activeforeground=BG_DARK,
-                                  relief="flat", padx=24, pady=10, cursor="hand2",
+                                  relief="flat", padx=24, pady=30, cursor="hand2",
                                   state="disabled",
                                   command=self._go_process)
         self.btn_next.pack(anchor="e", pady=(6, 0))
@@ -511,7 +511,7 @@ class ProcessingPage(tk.Frame):
         c = self.anim_canvas
         c.delete("all")
         layers = [3, 5, 5, 4, 3]
-        lx = [40, 100, 180, 260, 310]
+        lx = [15, 85, 155, 225, 290]
         ly_start = 30
         spacing = 36
 
@@ -635,7 +635,18 @@ class ProcessingPage(tk.Frame):
                 l.config(fg=TEXT_SEC)
             ))
             
-            # Steps 2+: Classification steps (placeholder - waiting for model)
+            # Run actual CNN classification on the standardized image
+            cnn_result = classification.classify(self.app.standardized_pil_image)
+
+            if cnn_result["error"]:
+                self.after(100, lambda: messagebox.showerror(
+                    "Classification Failed", f"CNN Error:\n{cnn_result['error']}"))
+                self.after(200, lambda: self.app.show_page("UploadPage"))
+                return
+
+            self._cnn_result = cnn_result
+
+            # Animate CNN layer steps (cosmetic — model has already run)
             for i in range(2, n):
                 dot, lbl = self.step_labels[i]
                 self.after(0, lambda d=dot, l=lbl: (
@@ -644,12 +655,12 @@ class ProcessingPage(tk.Frame):
                 ))
                 pct = int((i + 0.5) / n * 100)
                 self.after(0, lambda p=pct: self._set_progress(p))
-                import time; time.sleep(0.45)
+                import time; time.sleep(0.35)
                 self.after(0, lambda d=dot, l=lbl: (
                     d.config(text="●", fg=ACCENT2),
                     l.config(fg=TEXT_SEC)
                 ))
-            
+
             self.after(0, lambda: self._set_progress(100))
             self.after(200, self._finish_inference)
 
@@ -663,16 +674,10 @@ class ProcessingPage(tk.Frame):
         if self._anim_id:
             self.after_cancel(self._anim_id)
 
-        # Fake probabilities (replace with real model.predict() output)
-        raw = np.random.dirichlet(np.ones(3) * 0.5)
-        winner = np.argmax(raw)
-        # Boost winner for demo realism
-        raw[winner] = max(raw[winner], 0.55)
-        raw /= raw.sum()
-
-        self.app.all_probs = {GALAXY_LABELS[i][0]: float(raw[i]) for i in range(3)}
-        self.app.result_label.set(GALAXY_LABELS[winner][0])
-        self.app.result_conf.set(float(raw[winner]))
+        result = self._cnn_result
+        self.app.all_probs = result["probabilities"]
+        self.app.result_label.set(result["label"])
+        self.app.result_conf.set(result["confidence"])
 
         self.after(400, lambda: self.app.show_page("ResultPage"))
 
@@ -764,13 +769,13 @@ class ResultPage(tk.Frame):
         tk.Button(btn_row, text="← Try another image",
                   font=FONT_BODY, bg=BG_CARD, fg=TEXT_SEC,
                   activebackground=BG_MID, activeforeground=TEXT_PRIMARY,
-                  relief="flat", padx=18, pady=8, cursor="hand2",
+                  relief="flat", padx=18, pady=20, cursor="hand2",
                   command=self._go_back).pack(side="left")
 
         tk.Button(btn_row, text="Save result",
                   font=FONT_BODY, bg=ACCENT, fg="white",
                   activebackground=ACCENT_DIM, activeforeground="white",
-                  relief="flat", padx=18, pady=8, cursor="hand2",
+                  relief="flat", padx=18, pady=20, cursor="hand2",
                   command=self._save_result).pack(side="left", padx=(10, 0))
 
     def _step_bar(self, parent, current):
@@ -923,7 +928,6 @@ if __name__ == "__main__":
         )
         root.destroy()
 
-#testing 
-
+    #testing 
     app = GalaxyApp()
     app.mainloop()

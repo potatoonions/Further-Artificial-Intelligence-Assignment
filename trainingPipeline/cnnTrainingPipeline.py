@@ -27,14 +27,24 @@ dataset_path = "/root/.cache/kagglehub/datasets/robertmifsud/resized-reduced-gz2
 ##########  STEP 2: Dataset Setup  ###########
 ##############################################
 
+import tensorflow as tf
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 img_size = 256 #299
 batch_size = 32
 
-datagen = ImageDataGenerator(rescale=1./255, validation_split=0.2)
+# Augmentation only on training data; validation just rescales
+train_datagen = ImageDataGenerator(
+    rescale=1./255,
+    validation_split=0.2,
+    rotation_range=180,       # galaxies have no preferred orientation
+    horizontal_flip=True,
+    vertical_flip=True,
+)
 
-train_generator = datagen.flow_from_directory(
+val_datagen = ImageDataGenerator(rescale=1./255, validation_split=0.2)
+
+train_generator = train_datagen.flow_from_directory(
     dataset_path,
     target_size=(img_size, img_size),
     batch_size=batch_size,
@@ -42,13 +52,31 @@ train_generator = datagen.flow_from_directory(
     subset='training'
 )
 
-val_generator = datagen.flow_from_directory(
+val_generator = val_datagen.flow_from_directory(
     dataset_path,
     target_size=(img_size, img_size),
     batch_size=batch_size,
     class_mode='categorical',
     subset='validation'
 )
+
+# Wrap in tf.data.Dataset with .repeat() so the generator doesn't
+# exhaust mid-training when steps_per_epoch < full dataset size
+train_dataset = tf.data.Dataset.from_generator(
+    lambda: train_generator,
+    output_signature=(
+        tf.TensorSpec(shape=(None, img_size, img_size, 3), dtype=tf.float32),
+        tf.TensorSpec(shape=(None, 3), dtype=tf.float32)
+    )
+).repeat()
+
+val_dataset = tf.data.Dataset.from_generator(
+    lambda: val_generator,
+    output_signature=(
+        tf.TensorSpec(shape=(None, img_size, img_size, 3), dtype=tf.float32),
+        tf.TensorSpec(shape=(None, 3), dtype=tf.float32)
+    )
+).repeat()
 
 ##############################################
 ######## STEP 3: Building the CNN  ###########
@@ -87,12 +115,43 @@ model.summary()
 ######  STEP 4: Training the Model   #########
 ##############################################
 
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+
+EXPORT_DIR = "/content/galaxy_cnn_export"
+os.makedirs(EXPORT_DIR, exist_ok=True)
+
+callbacks = [
+    # Save the best model (by val_accuracy) during training
+    ModelCheckpoint(
+        filepath=os.path.join("/content/galaxy_cnn_export", "galaxy_cnn_best.keras"),
+        monitor='val_accuracy',
+        save_best_only=True,
+        verbose=1
+    ),
+    # Stop early if val_accuracy hasn't improved for 5 epochs
+    EarlyStopping(
+        monitor='val_accuracy',
+        patience=5,
+        restore_best_weights=True,
+        verbose=1
+    ),
+    # Halve the learning rate if val_loss plateaus for 3 epochs
+    ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=3,
+        min_lr=1e-6,
+        verbose=1
+    ),
+]
+
 history = model.fit(
-    train_generator,
-    steps_per_epoch=200,  # instead of 3011
-    epochs=20,
-    validation_data=val_generator,
-    validation_steps=30
+    train_dataset,
+    steps_per_epoch=len(train_generator),  # full dataset every epoch
+    epochs=50,                              # EarlyStopping will cut this short
+    validation_data=val_dataset,
+    validation_steps=len(val_generator),    # full validation set
+    callbacks=callbacks
 )
 
 ##############################################
@@ -167,10 +226,7 @@ plt.show()
 import json
 from google.colab import files
 
-EXPORT_DIR = "/content/galaxy_cnn_export"
-os.makedirs(EXPORT_DIR, exist_ok=True)
-
-# Save model in Keras native format
+# Save model in Keras native format (best weights already saved by ModelCheckpoint)
 model_path = os.path.join(EXPORT_DIR, "galaxy_cnn.keras")
 model.save(model_path)
 print(f"Model saved to: {model_path}")
