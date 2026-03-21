@@ -923,5 +923,7 @@ if __name__ == "__main__":
         )
         root.destroy()
 
+#testing 
+
     app = GalaxyApp()
     app.mainloop()
