@@ -114,32 +114,28 @@ def load_image_b64(path: Path) -> tuple:
 
 def validate_galaxy(image_path: str) -> dict:
     """
-    Validate if image is a galaxy using Gemini API.
+    Validate if image is a galaxy using OpenAI GPT-5.4.
     Returns dict with is_galaxy (bool), response (str), error (str or None)
     """
     try:
-        # Import httpx
+        # Import openai
         try:
-            import httpx
+            from openai import OpenAI
         except ImportError:
             return {
                 "is_galaxy": None,
                 "response": None,
-                "error": "httpx not installed. Install with: pip install httpx",
+                "error": "openai not installed. Install with: pip install openai",
             }
         
-        # Get API keys and try each one
-        api_keys = []
-        for i in range(1, 7):
-            key = os.getenv(f"GEMINI_KEY_{i}", "").strip()
-            if key:
-                api_keys.append(key)
+        # Get OpenAI API key
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
         
-        if not api_keys:
+        if not api_key:
             return {
                 "is_galaxy": None,
                 "response": None,
-                "error": "No Gemini API keys found in .env file"
+                "error": "No OPENAI_API_KEY found in .env file"
             }
         
         prompt = (
@@ -150,66 +146,48 @@ def validate_galaxy(image_path: str) -> dict:
             "NOT GALAXY - if the image does NOT show a galaxy/galaxies. \n"
         )
         
-        path = Path(image_path)
-        mime_type, b64_data = load_image_b64(path)
+        try:
+            # Initialize OpenAI client
+            client = OpenAI(api_key=api_key)
+            
+            # Read image and encode as base64
+            path = Path(image_path)
+            mime_type, b64_data = load_image_b64(path)
+            
+            # Call GPT-5.4
+            response = client.chat.completions.create(
+                model="gpt-5.4",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{b64_data}",
+                                },
+                            },
+                        ],
+                    }
+                ],
+            )
+            
+            text = response.choices[0].message.content.strip()
+            is_galaxy = text.upper().startswith("GALAXY")
+            
+            return {
+                "is_galaxy": is_galaxy,
+                "response": text,
+                "error": None,
+            }
         
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": b64_data,
-                            }
-                        },
-                    ]
-                }
-            ]
-        }
-        
-        GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash"
-        
-        # Try each API key
-        last_error = None
-        for api_key in api_keys:
-            try:
-                with httpx.Client(timeout=60.0) as client:
-                    resp = client.post(
-                        GEMINI_API_URL,
-                        params={"key": api_key},
-                        json=payload
-                    )
-                    
-                    if resp.status_code == 200:
-                        body = resp.json()
-                        
-                        # Check for API errors in response
-                        if "error" in body:
-                            last_error = f"API Error: {body['error'].get('message', str(body['error']))}"
-                            continue
-                        
-                        text = body["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        is_galaxy = text.upper().startswith("GALAXY")
-                        
-                        return {
-                            "is_galaxy": is_galaxy,
-                            "response": text,
-                            "error": None,
-                        }
-                    else:
-                        last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-            except Exception as e:
-                last_error = str(e)
-                continue
-        
-        # If all keys failed
-        return {
-            "is_galaxy": None,
-            "response": None,
-            "error": last_error or "All API keys failed",
-        }
+        except Exception as e:
+            return {
+                "is_galaxy": None,
+                "response": None,
+                "error": str(e),
+            }
     
     except Exception as e:
         return {
@@ -913,11 +891,11 @@ if __name__ == "__main__":
     
     # Check for required dependencies
     try:
-        import httpx
+        from openai import OpenAI
     except ImportError:
         import subprocess, sys
-        print("Installing httpx for Gemini API validation...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx", "-q"])
+        print("Installing openai for GPT-5.4 Vision validation...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openai", "-q"])
     
     try:
         from dotenv import load_dotenv
