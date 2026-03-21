@@ -43,6 +43,8 @@ Thumbs.db
 *.log
 
 # Model files (optional - uncomment if needed)
+galaxy_cnn.keras
+model_metadata.json
 # *.h5
 # *.keras
 # *.pth
