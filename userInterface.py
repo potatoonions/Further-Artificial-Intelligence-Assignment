@@ -50,7 +50,7 @@ GALAXY_LABELS = {
     2: ("Bar-Spiral",  "—",  "#00D4AA"),
 }
 
-WIN_W, WIN_H = 860, 600
+WIN_W, WIN_H = 860, 660
 
 
 # ─────────────────────────────────────────────
@@ -331,10 +331,11 @@ class UploadPage(tk.Frame):
                                   font=("Segoe UI", 12, "bold"),
                                   bg=ACCENT2, fg=BG_DARK,
                                   activebackground="#00B090", activeforeground=BG_DARK,
-                                  relief="flat", padx=24, pady=30, cursor="hand2",
+                                  relief="flat", padx=28, pady=12, width=18, height=2,
+                                  cursor="hand2",
                                   state="disabled",
                                   command=self._go_process)
-        self.btn_next.pack(anchor="e", pady=(6, 0))
+        self.btn_next.pack(anchor="e", pady=(18, 12))
 
     # ── helpers ──────────────────────────────
     def _step_bar(self, parent, current):
